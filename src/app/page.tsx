@@ -220,8 +220,12 @@ function Inbox({ session }: { session: Session }) {
   );
 }
 
-/** Notifications on this device: a push for each new report (the service worker shows it). */
-function Notifications({ api }: { api: (path: string, init?: RequestInit) => Promise<{ sent?: number }> }) {
+/**
+ * Notifications on this device: a push for each new report (the service worker shows it). A subscription made
+ * with older VAPID keys can never receive, so it is replaced; and the server is told about it on each visit.
+ */
+type PushResult = { devices?: number; sent?: number; failures?: { status?: number; reason: string }[] };
+function Notifications({ api }: { api: (path: string, init?: RequestInit) => Promise<PushResult> }) {
   const supported = typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window;
   const [on, setOn] = useState(false);
   const [note, setNote] = useState("");
@@ -230,32 +234,58 @@ function Notifications({ api }: { api: (path: string, init?: RequestInit) => Pro
     const b = atob((key + "=".repeat((4 - (key.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/"));
     return Uint8Array.from(b, (c) => c.charCodeAt(0));
   }, [key]);
+  const sameKey = (sub: PushSubscription) => {
+    const k = sub.options.applicationServerKey;
+    if (!k) return true;
+    const a = new Uint8Array(k);
+    return a.length === appKey.length && a.every((v, i) => v === appKey[i]);
+  };
   useEffect(() => {
     if (!supported) return;
-    void navigator.serviceWorker.register("/sw.js").then(async (reg) => setOn(!!(await reg.pushManager.getSubscription())));
-  }, [supported]);
+    void navigator.serviceWorker.register("/sw.js").then(async (reg) => {
+      const sub = await reg.pushManager.getSubscription();
+      if (!sub) return;
+      if (!sameKey(sub) || Notification.permission !== "granted") { await sub.unsubscribe(); setNote("Notifications need turning on again on this device."); return; }
+      setOn(true);
+      await api("/api/console/push", { method: "POST", body: JSON.stringify({ subscription: sub.toJSON() }) }).catch(() => undefined);
+    });
+  }, [supported]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!supported) return <span className="hint">Notifications: on iPhone, add this page to the home screen first.</span>;
+
+  const test = async () => {
+    setNote("Sending a test…");
+    try {
+      const r = await api("/api/console/push/test", { method: "POST" });
+      if (r.sent) setNote(`Test sent to ${r.sent} device${r.sent > 1 ? "s" : ""}. Nothing showing? Check Windows or phone notification settings for your browser.`);
+      else if (r.failures?.length) setNote(`The test could not be sent: ${r.failures.map((f) => (f.status ? `${f.status} ` : "") + f.reason).join("; ")}`);
+      else setNote("No device has notifications on.");
+    } catch (e) { setNote((e as Error).message); }
+  };
   const enable = async () => {
     setNote("");
     try {
-      if ((await Notification.requestPermission()) !== "granted") { setNote("Notifications are blocked for this site."); return; }
+      if ((await Notification.requestPermission()) !== "granted") { setNote("Notifications are blocked for this site: allow them in the browser's site settings."); return; }
       const reg = await navigator.serviceWorker.ready;
-      const sub = (await reg.pushManager.getSubscription()) ?? await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: appKey });
+      let sub = await reg.pushManager.getSubscription();
+      if (sub && !sameKey(sub)) { await sub.unsubscribe(); sub = null; }
+      sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: appKey });
       await api("/api/console/push", { method: "POST", body: JSON.stringify({ subscription: sub.toJSON() }) });
       setOn(true);
-      const { sent } = await api("/api/console/push/test", { method: "POST" });
-      setNote(sent ? "Test notification sent." : "Subscribed; the test notification could not be sent (check the VAPID keys).");
+      await test();
     } catch (e) { setNote((e as Error).message); }
   };
   const disable = async () => {
     const reg = await navigator.serviceWorker.ready;
     const sub = await reg.pushManager.getSubscription();
     if (sub) { await api("/api/console/push", { method: "DELETE", body: JSON.stringify({ endpoint: sub.endpoint }) }); await sub.unsubscribe(); }
-    setOn(false);
+    setOn(false); setNote("");
   };
   return (
     <span className="notify">
-      {on ? <button onClick={() => void disable()}>🔔 Notifications on</button> : <button className="primary" onClick={() => void enable()}>Turn on notifications</button>}
+      {on ? <>
+        <button onClick={() => void test()}>Send test</button>
+        <button onClick={() => void disable()} title="Turn off notifications on this device">🔔 On</button>
+      </> : <button className="primary" onClick={() => void enable()}>Turn on notifications</button>}
       {note && <span className="hint">{note}</span>}
     </span>
   );
