@@ -2,16 +2,24 @@
  * Telling the owner a report arrived: a push notification to every device where Prime Console has
  * notifications on, and (if set up) an email through Resend. Failures here never fail the report.
  */
+import { createECDH } from "node:crypto";
 import webpush from "web-push";
 import { db } from "./supabase";
 import { LABEL, type Report } from "./feedback";
 
-function vapid(): boolean {
-  const pub = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY, priv = process.env.VAPID_PRIVATE_KEY;
-  if (!pub || !priv) return false;
+/** Sets up the VAPID keys; returns why they cannot be used, or "" when they can. */
+function vapid(): string {
+  const pub = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY?.trim(), priv = process.env.VAPID_PRIVATE_KEY?.trim();
+  if (!pub || !priv) return "VAPID keys are not set on the server";
+  try {
+    const ecdh = createECDH("prime256v1");
+    ecdh.setPrivateKey(Buffer.from(priv, "base64url"));
+    if (ecdh.getPublicKey().toString("base64url") !== pub)
+      return "VAPID_PRIVATE_KEY does not match NEXT_PUBLIC_VAPID_PUBLIC_KEY: set both from the same `npm run vapid`, redeploy, then turn notifications on again";
+  } catch { return "VAPID_PRIVATE_KEY is not a valid key"; }
   const contact = (process.env.VAPID_CONTACT ?? "owner@example.com").trim().replace(/^mailto:/i, "");
-  webpush.setVapidDetails(/^https:\/\//.test(contact) ? contact : `mailto:${contact}`, pub.trim(), priv.trim());
-  return true;
+  webpush.setVapidDetails(/^https:\/\//.test(contact) ? contact : `mailto:${contact}`, pub, priv);
+  return "";
 }
 
 export interface PushResult { devices: number; sent: number; failures: { status?: number; reason: string }[] }
@@ -22,7 +30,8 @@ export interface PushResult { devices: number; sent: number; failures: { status?
  */
 export async function pushAll(message: { title: string; body: string; url: string; tag?: string }): Promise<PushResult> {
   const result: PushResult = { devices: 0, sent: 0, failures: [] };
-  if (!vapid()) { result.failures.push({ reason: "VAPID keys are not set on the server" }); return result; }
+  const problem = vapid();
+  if (problem) { console.error("push:", problem); result.failures.push({ reason: problem }); return result; }
   const { data, error } = await db().from("push_subscriptions").select("endpoint, subscription");
   if (error) { result.failures.push({ reason: error.message }); return result; }
   result.devices = data?.length ?? 0;

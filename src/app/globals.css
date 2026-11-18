@@ -98,3 +98,9 @@ a { color: var(--red); }
 .detail pre { background: var(--sand); padding: 10px; border-radius: 8px; overflow: auto; font-size: 12px; }
 .detail .actions { display: flex; gap: 8px; margin-top: 14px; }
 .detail .back { margin-bottom: 8px; }
+
+/* Phones: title and Sign out on one row, notifications below it. */
+@media (max-width: 600px) {
+  .inbox header .notify { order: 3; flex-basis: 100%; }
+  .filters .link { margin-left: auto; }
+}
