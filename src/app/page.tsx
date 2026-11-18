@@ -21,34 +21,118 @@ const kb = (n: number) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} K
 export default function Console() {
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
+  const [recovering, setRecovering] = useState(false);
   useEffect(() => {
     void supabase.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true); });
-    const { data } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    const { data } = supabase.auth.onAuthStateChange((event, s) => {
+      setSession(s);
+      if (event === "PASSWORD_RECOVERY") setRecovering(true);
+    });
     return () => data.subscription.unsubscribe();
   }, []);
   if (!ready) return null;
-  return session ? <Inbox session={session} /> : <SignIn />;
+  if (recovering) return <Welcome mode="reset" onDone={() => setRecovering(false)} />;
+  return session ? <Inbox session={session} /> : <Welcome mode="signin" />;
 }
 
-function SignIn() {
+/** The Prime P with its red prime mark: the family's logo. */
+function Logo({ size = 44 }: { size?: number }) {
+  return <img src="/logo.svg" width={size} height={size} alt="" />;
+}
+
+/** Sign in, "forgot password", and setting a new password (from the emailed link): one welcoming page. */
+function Welcome({ mode: start, onDone }: { mode: "signin" | "reset"; onDone?: () => void }) {
+  const [mode, setMode] = useState<"signin" | "forgot" | "reset">(start);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  return (
-    <main className="signin">
-      <h1>Prime Console</h1>
-      <form onSubmit={async (e) => {
-        e.preventDefault();
-        setError("");
+  const [note, setNote] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true); setError(""); setNote("");
+    try {
+      if (mode === "signin") {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) setError(error.message === "Invalid login credentials" ? "That email and password don't match." : error.message);
+      } else if (mode === "forgot") {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: location.origin });
         if (error) setError(error.message);
-      }}>
-        <label>Email <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required /></label>
-        <label>Password <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required /></label>
-        <button className="primary">Sign in</button>
-        {error && <p className="error">{error}</p>}
-      </form>
-    </main>
+        else setNote("If that email has an account, a link to set a new password is on its way.");
+      } else {
+        const { error } = await supabase.auth.updateUser({ password });
+        if (error) setError(error.message);
+        else { history.replaceState(null, "", "/"); onDone?.(); }
+      }
+    } finally { setBusy(false); }
+  };
+
+  const title = { signin: "Welcome back", forgot: "Reset your password", reset: "Choose a new password" }[mode];
+  const lead = {
+    signin: "Use your Prime Console email and password.",
+    forgot: "Enter your email and we'll send you a link to set a new password.",
+    reset: "At least 8 characters. You'll stay signed in on this device.",
+  }[mode];
+
+  return (
+    <div className="welcome">
+      <aside className="brand-panel">
+        <div className="brand-mark"><Logo size={72} /><span>Prime<br />Productivity</span></div>
+        <div className="brand-copy">
+          <p className="eyebrow">Prime Console</p>
+          <h2>Every report, from every app, in one place.</h2>
+          <span className="rule" />
+          <p className="lede">Bug reports, feature requests and feedback from Prime Word and the apps to come, with a
+            notification on your phone the moment one arrives.</p>
+        </div>
+        <footer><span className="eyebrow">Tools that work for you</span><span>© Prime Productivity</span></footer>
+      </aside>
+      <main className="form-panel">
+        <form onSubmit={submit}>
+          <div className="mobile-mark"><Logo size={44} /></div>
+          <p className="eyebrow">{mode === "signin" ? "Sign in" : "Password"}</p>
+          <h1>{title}</h1>
+          <span className="rule" />
+          <p className="lead">{lead}</p>
+          {mode !== "reset" && (
+            <label className="field"><span>Email address</span>
+              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="username" required autoFocus />
+            </label>
+          )}
+          {mode !== "forgot" && (
+            <label className="field">
+              <span>{mode === "reset" ? "New password" : "Password"}
+                {mode === "signin" && <button type="button" className="text-link" onClick={() => { setMode("forgot"); setError(""); }}>Forgot password?</button>}
+              </span>
+              <span className="pw">
+                <input type={show ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)}
+                  autoComplete={mode === "reset" ? "new-password" : "current-password"} minLength={mode === "reset" ? 8 : undefined} required autoFocus={mode === "reset"} />
+                <button type="button" className="eye" onClick={() => setShow(!show)} aria-label={show ? "Hide password" : "Show password"} title={show ? "Hide password" : "Show password"}>
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                    <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" />
+                    {show && <path d="M4 4l16 16" />}
+                  </svg>
+                </button>
+              </span>
+            </label>
+          )}
+          <button className="go" disabled={busy}>
+            {{ signin: "Sign in", forgot: "Send the link", reset: "Save password" }[mode]}
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 12h12M11 7l5 5-5 5M20 4v16" />
+            </svg>
+          </button>
+          {error && <p className="error" role="alert">{error}</p>}
+          {note && <p className="note" role="status">{note}</p>}
+          {mode === "forgot"
+            ? <p className="foot"><button type="button" className="text-link" onClick={() => { setMode("signin"); setNote(""); setError(""); }}>← Back to sign in</button></p>
+            : <p className="foot">Need an account? Accounts are added by the owner in Supabase → Authentication.</p>}
+        </form>
+      </main>
+    </div>
   );
 }
 
@@ -92,7 +176,7 @@ function Inbox({ session }: { session: Session }) {
   return (
     <main className="inbox">
       <header>
-        <h1>Prime Console</h1>
+        <h1><Logo size={30} /> Prime Console</h1>
         <Notifications api={api} />
         <button className="link" onClick={() => void supabase.auth.signOut()}>Sign out</button>
       </header>
